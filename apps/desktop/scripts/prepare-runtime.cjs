@@ -639,9 +639,11 @@ function fixPyvenvCfgHome(backendStageRoot) {
     return; // 已经正确，无需修改
   }
 
-  const newContent = content.replace(/^home\s*=\s*.+$/m, `home = ${embedPythonDir}`);
+  // 使用相对路径，避免打包后安装到用户机器上因绝对路径失效
+  const relativeHome = "python";
+  const newContent = content.replace(/^home\s*=\s*.+$/m, `home = ${relativeHome}`);
   fs.writeFileSync(pyvenvPath, newContent, "utf-8");
-  console.log(`[aiasys-desktop] 已修正 pyvenv.cfg home 路径: ${embedPythonDir}`);
+  console.log(`[aiasys-desktop] 已修正 pyvenv.cfg home 路径: ${relativeHome} (相对于 .venv)`);
 }
 
 function pruneDevDependencies(backendStageRoot) {
