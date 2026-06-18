@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 
 import pytest
@@ -47,8 +48,9 @@ def test_detect_family_from_name():
     assert ex._detect_family_from_name("powershell.exe") == "powershell"
     assert ex._detect_family_from_name("cmd.exe") == "cmd"
     assert ex._detect_family_from_name("unknown") is None
-    # Windows 内置 WSL bash 路径应识别为 wsl
-    assert ex._detect_family_from_name(r"C:\Windows\system32\bash.exe") == "wsl"
+    # Windows 内置 WSL bash 路径应识别为 wsl（仅 Windows 上生效）
+    if os.name == "nt":
+        assert ex._detect_family_from_name(r"C:\Windows\system32\bash.exe") == "wsl"
 
 
 def test_bash_keyword_resolves():
@@ -133,16 +135,25 @@ def test_windows_auto_prefers_powershell(monkeypatch: pytest.MonkeyPatch) -> Non
     assert path.endswith("powershell.exe")
 
 
-def test_windows_explicit_cmd_still_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """显式指定 interpreter=cmd 时，仍允许使用 cmd.exe（兼容旧入口，但不推荐）。"""
+def test_windows_explicit_cmd_degraded_to_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    """显式指定 interpreter=cmd 时，应降级为 powershell（cmd 已废弃）。"""
     ex = ShellExecutor()
     monkeypatch.setattr(ex, "_is_windows", True)
-    monkeypatch.setattr(shutil, "which", lambda name: r"C:\Windows\System32\cmd.exe" if name == "cmd" else None)
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: {
+            "pwsh": r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "powershell": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "cmd": r"C:\Windows\System32\cmd.exe",
+        }.get(name),
+    )
 
     path, args, family = ex.detect_interpreter("cmd")
-    assert family == "cmd"
-    assert args == ["/c"]
-    assert path.endswith("cmd.exe")
+    # cmd 被降级为 powershell，不再返回 cmd family
+    assert family == "powershell"
+    assert args == ["-NoProfile", "-Command"]
+    assert path.endswith("pwsh.exe") or path.endswith("powershell.exe")
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,6 @@ import asyncio
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -104,10 +103,7 @@ class ShellExecutor:
         if os.name != "nt" or not path:
             return False
         lower = path.lower()
-        return (
-            "windows\\system32\\bash" in lower
-            or "windows\\syswow64\\bash" in lower
-        )
+        return "windows\\system32\\bash" in lower or "windows\\syswow64\\bash" in lower
 
     @staticmethod
     def _detect_family_from_name(name: str) -> str | None:
@@ -202,8 +198,20 @@ class ShellExecutor:
         elif name == "cmd":
             if not self._is_windows:
                 raise RuntimeError("interpreter='cmd' 仅在 Windows 上可用")
-            path = shutil.which("cmd") or "cmd.exe"
-            result = (path, ["/c"], "cmd")
+            # cmd 已禁用，降级到 powershell。仅当 powershell 也找不到时才用 cmd 兜底。
+            ps = shutil.which("pwsh") or shutil.which("powershell")
+            if ps:
+                logger.warning(
+                    "interpreter='cmd' 已废弃，自动降级为 powershell。"
+                    "AIASys 已对齐 Copilot，不再使用 cmd.exe 作为默认 shell。"
+                )
+                result = (ps, ["-NoProfile", "-Command"], "powershell")
+            else:
+                logger.warning(
+                    "interpreter='cmd' 已废弃且未找到 powershell，极端情况下回退到 cmd 兜底。"
+                )
+                path = shutil.which("cmd") or "cmd.exe"
+                result = (path, ["/c"], "cmd")
 
         elif name != "auto":
             # 尝试作为路径/短名解析
@@ -211,7 +219,7 @@ class ShellExecutor:
             if custom is None:
                 raise ValueError(
                     f"不支持的 interpreter: {original}，"
-                    "可选值: auto、bash、wsl、busybox、powershell、cmd，"
+                    "可选值: auto、bash、wsl、busybox、powershell，"
                     "或传入可执行文件路径"
                 )
             result = custom
@@ -590,18 +598,14 @@ class ShellExecutor:
         字面量百分号。环境变量展开 semantics 与直接 cmd /c 不完全一致，
         但这是保证带引号命令能稳定执行的最小代价。
         """
-        script = Path(tempfile.gettempdir()) / (
-            f"aiasys_cmd_{os.getpid()}_{id(command)}.cmd"
-        )
+        script = Path(tempfile.gettempdir()) / (f"aiasys_cmd_{os.getpid()}_{id(command)}.cmd")
         # 在 batch 文件中 % 需要写成 %% 才能输出字面量 %
         bat_command = command.replace("%", "%%")
         script.write_text("@echo off\n" + bat_command + "\n", encoding="utf-8")
         return script
 
     @staticmethod
-    async def _cleanup_cmd_script(
-        proc: asyncio.subprocess.Process, path: Path
-    ) -> None:
+    async def _cleanup_cmd_script(proc: asyncio.subprocess.Process, path: Path) -> None:
         """等子进程结束后删除临时 cmd 脚本。"""
         try:
             await proc.wait()

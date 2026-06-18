@@ -250,12 +250,13 @@ def wrap_shell_command_for_runtime(
                 project_dir,
             )
             return command, plan.workspace
-        # Windows 没有 sh，uv run 会因此失败；改用 cmd /c。
+        # Windows 没有 sh，uv run 会因此失败；改用 powershell -NoProfile -Command。
+        # cmd.exe 已禁用，对齐 Copilot 不再使用 cmd。
         if os.name == "nt":
             wrapped = (
                 f"uv run --project {_shell_quote(str(project_dir))} "
                 f"--directory {_shell_quote(str(plan.workspace or project_dir))} "
-                f"cmd /c {_shell_quote(command)}"
+                f"powershell -NoProfile -Command {_shell_quote(command)}"
             )
         else:
             wrapped = (

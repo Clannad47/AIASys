@@ -42,6 +42,7 @@ from app.services.runtime_tooling import (
     probe_runtime_tool,
 )
 from app.services.session.core import SessionManager
+from app.utils.path_utils import as_system_path
 
 logger = logging.getLogger(__name__)
 
@@ -834,7 +835,7 @@ async def generate_dynamic_agent_config(
     rendered_prompt = str(agent_config["agent"].pop("system_prompt", "") or "")
     temp_prompt_filename = f"prompt_{user_id}_{session_id}_{timestamp}.md"
     temp_prompt_path = temp_agent_config_dir / temp_prompt_filename
-    temp_prompt_path.write_text(rendered_prompt, encoding="utf-8")
+    Path(as_system_path(temp_prompt_path)).write_text(rendered_prompt, encoding="utf-8")
     agent_config["agent"]["system_prompt_path"] = str(temp_prompt_path.resolve())
     agent_config["agent"]["system_prompt_args"] = {}
 
@@ -853,7 +854,7 @@ async def generate_dynamic_agent_config(
                 f"subprompt_{subagent_name}_{user_id}_{session_id}_{timestamp}.md"
             )
             temp_subagent_prompt_path = temp_agent_config_dir / temp_subagent_prompt_filename
-            temp_subagent_prompt_path.write_text(
+            Path(as_system_path(temp_subagent_prompt_path)).write_text(
                 rendered_subagent_prompt,
                 encoding="utf-8",
             )
@@ -865,7 +866,7 @@ async def generate_dynamic_agent_config(
             )
             temp_subagent_path = temp_agent_config_dir / temp_subagent_filename
 
-            with open(temp_subagent_path, "w", encoding="utf-8") as f:
+            with open(as_system_path(temp_subagent_path), "w", encoding="utf-8") as f:
                 f.write(
                     tomli_w.dumps({"version": 1, "agent": _strip_none_values(embedded_manifest)})
                 )
@@ -882,7 +883,7 @@ async def generate_dynamic_agent_config(
     temp_agent_filename = f"agent_{user_id}_{session_id}_{timestamp}.toml"
     temp_agent_path = temp_agent_config_dir / temp_agent_filename
 
-    with open(temp_agent_path, "w", encoding="utf-8") as f:
+    with open(as_system_path(temp_agent_path), "w", encoding="utf-8") as f:
         f.write(tomli_w.dumps(_strip_none_values(agent_config)))
 
     logger.info(

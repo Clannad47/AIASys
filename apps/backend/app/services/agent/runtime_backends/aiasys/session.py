@@ -406,31 +406,28 @@ class AiasysRuntimeSession(
             "posix": (
                 "当前 Windows 使用 Git Bash。你可以编写标准 POSIX 命令 "
                 "（ls、cat、grep、sed、awk、find、python 等），路径使用 /c/foo/bar 风格。"
-                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell/cmd。"
+                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell。"
             ),
             "wsl": (
                 "当前 Windows 未安装 Git Bash，但检测到 WSL。shell 命令将通过 `wsl.exe bash -c` 执行。"
                 "你可以使用常见 POSIX 命令；访问 Windows 路径时请注意 /mnt/c/ 挂载转换。"
-                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell/cmd。"
+                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell。"
             ),
             "busybox": (
                 "当前 Windows 使用 busybox-w32（ash）作为轻量 POSIX fallback。"
                 "仅支持基础 POSIX 命令，避免使用 GNU bash 数组、[[ ]]、进程替换等扩展特性；"
                 "复杂任务建议用户安装 Git for Windows：https://git-scm.com/download/win。"
-                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell/cmd。"
+                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell。"
             ),
             "powershell": (
                 "当前 Windows 未检测到 POSIX shell，shell 命令将使用 PowerShell 执行。"
                 "请优先使用跨平台命令或 PowerShell cmdlet（Get-Content、Select-String、Where-Object 等）；"
                 "如需完整 POSIX 环境，建议用户安装 Git for Windows：https://git-scm.com/download/win。"
-                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell/cmd。"
+                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell。"
             ),
             "cmd": (
-                "当前 Windows 未检测到 POSIX shell / PowerShell，shell 命令将使用 CMD 执行。"
-                "请仅使用 CMD 兼容命令（dir、type、findstr、copy、move 等），路径用双引号包裹；"
-                "如需 POSIX 环境，建议安装 Git for Windows：https://git-scm.com/download/win "
-                "或下载轻量 fallback busybox-w32：https://frippery.org/busybox/。"
-                "若需要显式切换解释器，可在 Shell 工具的 interpreter 参数中指定 bash/wsl/busybox/powershell/cmd。"
+                "cmd 解释器已废弃。AIASys 已对齐 Copilot，不再使用 cmd.exe 作为 shell。"
+                "传入 cmd 将自动降级为 powershell。请改用 powershell 或安装 POSIX shell（Git Bash / WSL / busybox-w32）。"
             ),
         }
 

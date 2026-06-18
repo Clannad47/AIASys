@@ -18,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from app.core.config import DATA_DIR, RUNTIME_ROOT
+from app.core.encoding_utils import smart_decode
 from app.core.uv_utils import find_uv_binary, get_uv_version
 from app.services.shell_executor import ShellExecutor, get_shell_executor
 
@@ -142,11 +143,12 @@ def _find_busybox() -> str | None:
 def _get_version(argv: list[str], pattern: str | None = None, timeout: int = 5) -> str | None:
     """运行命令取第一行输出作为版本信息。"""
     try:
-        output = subprocess.check_output(
-            argv,
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=timeout,
+        output = smart_decode(
+            subprocess.check_output(
+                argv,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+            )
         ).strip()
         if not output:
             return None
