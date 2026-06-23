@@ -16,6 +16,7 @@ process.on("uncaughtException", (error) => {
 
 const desktopMode =
   process.env.AIASYS_DESKTOP_MODE || (app.isPackaged ? "preview" : "dev");
+const agentMode = process.env.AIASYS_AGENT_MODE === "1";
 // 确保 renderer/preload 继承的 mode 与主进程计算结果一致
 process.env.AIASYS_DESKTOP_MODE = desktopMode;
 const openDevTools =
@@ -71,6 +72,10 @@ function isWSL() {
     console.error("[aiasys-desktop] WSL detection failed:", e);
     return false;
   }
+}
+
+function isAgentMode() {
+  return agentMode;
 }
 
 if (process.platform === "linux") {
@@ -480,19 +485,23 @@ function createMainWindow(rendererBaseUrl) {
       !isSafeMode
     ) {
       console.error("[aiasys-desktop] 检测到渲染进程崩溃，将以安全模式重启");
-      dialog.showErrorBox(
-        "AIASys",
-        "检测到图形渲染兼容性问题，应用将以兼容模式重新启动。",
-      );
+      if (!isAgentMode()) {
+        dialog.showErrorBox(
+          "AIASys",
+          "检测到图形渲染兼容性问题，应用将以兼容模式重新启动。",
+        );
+      }
       app.relaunch({ args: [...process.argv.slice(1), "--disable-gpu"] });
       app.exit(1);
       return;
     }
 
-    dialog.showErrorBox(
-      "AIASys",
-      "渲染进程异常退出，应用将尝试重新加载页面。",
-    );
+    if (!isAgentMode()) {
+      dialog.showErrorBox(
+        "AIASys",
+        "渲染进程异常退出，应用将尝试重新加载页面。",
+      );
+    }
     if (mainWindow && !mainWindow.isDestroyed() && serviceManager) {
       mainWindow.loadURL(serviceManager.rendererBaseUrl).catch((err) => {
         console.error("[aiasys-desktop] 重新加载渲染页面失败:", err);
@@ -532,10 +541,12 @@ function createMainWindow(rendererBaseUrl) {
           validatedUrl,
         });
         closeSplashWindow();
-        dialog.showErrorBox(
-          "AIASys 加载失败",
-          `无法加载页面：${validatedUrl || initialUrl}\n错误：${errorDescription} (${errorCode})\n\n请检查日志目录获取详细信息。`,
-        );
+        if (!isAgentMode()) {
+          dialog.showErrorBox(
+            "AIASys 加载失败",
+            `无法加载页面：${validatedUrl || initialUrl}\n错误：${errorDescription} (${errorCode})\n\n请检查日志目录获取详细信息。`,
+          );
+        }
       }
     },
   );
@@ -788,6 +799,11 @@ ipcMain.handle("aiasys:select-folder", async (_event, options = {}) => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return { canceled: true, filePaths: [] };
   }
+  // Agent 模式：不阻塞等待用户选择，直接返回取消
+  if (isAgentMode()) {
+    console.log("[aiasys-desktop] agent mode: auto-cancel select-folder");
+    return { canceled: true, filePaths: [] };
+  }
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openDirectory"],
     title: options.title || "选择文件夹",
@@ -825,7 +841,11 @@ app.whenReady().then(() => {
       error instanceof Error ? error.stack || error.message : String(error);
     const fullMessage = `${errorMessage}\n\n日志目录: ${logsDir}`;
 
-    dialog.showErrorBox("AIASys 启动失败", fullMessage);
+    if (!isAgentMode()) {
+      dialog.showErrorBox("AIASys 启动失败", fullMessage);
+    } else {
+      console.error("[aiasys-desktop] bootstrap failed in agent mode:", fullMessage);
+    }
 
     // 尝试打开日志目录
     try {

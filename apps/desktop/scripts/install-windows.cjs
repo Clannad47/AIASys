@@ -178,6 +178,9 @@ function main() {
 示例:
   node scripts/install-windows.cjs dist/AIASys-0.4.25-win.zip
   node scripts/install-windows.cjs dist/AIASys-0.4.25-win.zip "C:\\Program Files\\AIASys"
+
+环境变量:
+  AIASYS_AGENT_MODE=1     Agent 模式，自动终止进程、跳过确认对话框
 `);
     process.exit(0);
   }

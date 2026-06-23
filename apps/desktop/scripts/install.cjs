@@ -209,10 +209,102 @@ function extractArchive(archivePath, targetDir) {
 // Windows
 // ---------------------------------------------------------------------------
 
+function copyDirRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const entries = fs.readdirSync(src);
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry);
+    const destPath = path.join(dest, entry);
+    const stat = fs.statSync(srcPath);
+    if (stat.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
 function installWindows(archivePath, targetDir) {
   killAiasysProcesses();
+
+  // 为避免 zip 内含 wrapper 目录导致安装验证失败，先解压到临时目录，
+  // 再根据实际内容决定是直接把 wrapper 内容搬到目标目录，还是整体搬到目标目录。
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "aiasys-install-"));
+  const tmpTarget = path.join(tmpRoot, "final");
+  fs.mkdirSync(tmpTarget, { recursive: true });
+
   backupOldVersion(targetDir);
-  extractArchive(archivePath, targetDir);
+  extractArchive(archivePath, tmpTarget);
+
+  const entries = fs.readdirSync(tmpTarget);
+  if (entries.length === 1) {
+    const only = path.join(tmpTarget, entries[0]);
+    if (fs.existsSync(only) && fs.statSync(only).isDirectory()) {
+      const nestedExe = path.join(only, "AIASys.exe");
+      if (fs.existsSync(nestedExe)) {
+        log("INFO", `检测到 zip 内含 wrapper 目录 ${entries[0]}，直接将其作为安装根目录`);
+        fs.mkdirSync(targetDir, { recursive: true });
+        copyDirRecursive(only, targetDir);
+        try {
+          fs.rmSync(tmpRoot, { recursive: true, force: true });
+        } catch {
+          // ignore cleanup error
+        }
+
+        // 创建快捷方式
+        const exePath = path.join(targetDir, "AIASys.exe");
+        if (!fs.existsSync(exePath)) {
+          log("WARN", `未找到 ${exePath}，跳过创建快捷方式`);
+        } else {
+          const desktopPath = path.join(os.homedir(), "Desktop");
+          const startMenuPath = path.join(
+            os.homedir(),
+            "AppData",
+            "Roaming",
+            "Microsoft",
+            "Windows",
+            "Start Menu",
+            "Programs"
+          );
+
+          for (const dir of [desktopPath, startMenuPath]) {
+            fs.mkdirSync(dir, { recursive: true });
+            const shortcutPath = path.join(dir, "AIASys.lnk");
+            const psCommand =
+              "$WshShell = New-Object -ComObject WScript.Shell; " +
+              `$Shortcut = $WshShell.CreateShortcut('${shortcutPath.replace(/'/g, "''")}'); ` +
+              `$Shortcut.TargetPath = '${exePath.replace(/'/g, "''")}'; ` +
+              `$Shortcut.WorkingDirectory = '${targetDir.replace(/'/g, "''")}'; ` +
+              "$Shortcut.Save()";
+            const result = exec("powershell", ["-NoProfile", "-Command", psCommand]);
+            if (result.status !== 0) {
+              log("WARN", `创建快捷方式失败 ${shortcutPath}: ${result.stderr || result.error}`);
+            } else {
+              log("INFO", `已创建快捷方式: ${shortcutPath}`);
+            }
+          }
+        }
+
+        // 验证
+        for (const rel of ["AIASys.exe", "resources", "resources/app.asar"]) {
+          if (!fs.existsSync(path.join(targetDir, rel))) {
+            fail(`安装验证失败: 缺少 ${rel}`);
+          }
+        }
+        log("INFO", `安装验证通过: ${targetDir}`);
+        log("INFO", `启动方式: 双击桌面快捷方式 "AIASys" 或运行 ${exePath}`);
+        return;
+      }
+    }
+  }
+
+  // 没有 wrapper 目录，把整个临时目录搬到目标目录
+  copyDirRecursive(tmpTarget, targetDir);
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {
+    // ignore cleanup error
+  }
 
   // 创建快捷方式
   const exePath = path.join(targetDir, "AIASys.exe");
@@ -401,6 +493,9 @@ function printUsage() {
   node scripts/install.cjs dist/AIASys-0.4.25-win.zip
   node scripts/install.cjs dist/AIASys-0.4.25-mac.zip
   node scripts/install.cjs dist/AIASys-0.4.25-linux.zip
+
+环境变量:
+  AIASYS_AGENT_MODE=1     Agent 模式，自动终止进程、跳过确认对话框
 `);
 }
 
