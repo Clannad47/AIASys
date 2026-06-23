@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -121,6 +122,11 @@ class CapabilityConfirmationManager:
             (approved, feedback) — approved 为 True 表示用户允许执行，
             feedback 为用户拒绝时填写的反馈文案或超时/取消原因
         """
+        # Agent 模式：跳过确认，直接批准
+        if os.environ.get("AIASYS_AGENT_MODE") == "1":
+            logger.debug("Agent 模式自动批准: tool=%s pattern=%s", tool_name, pattern_key)
+            return True, ""
+
         # 1. 检查会话级自动批准（pattern_key 为空时回退到 tool_name）
         check_key = pattern_key or tool_name
         if await self.is_auto_approved(check_key):

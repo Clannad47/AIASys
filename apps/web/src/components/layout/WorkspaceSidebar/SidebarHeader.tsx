@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Download,
@@ -5,14 +6,16 @@ import {
   Terminal,
   User,
   X,
+  Monitor,
+  Server,
 } from "lucide-react";
-import React from "react";
+import { apiRequest } from "@/lib/api/httpClient";
+import { formatVersionLabel } from "@/lib/version";
 
 interface SidebarHeaderProps {
   sessionId?: string;
   sessionTitle?: string | null;
   isExporting: boolean;
-  // Worker session 相关
   boundLeadSessionId?: string | null;
   onSwitchToLeadSession?: () => void;
   onExport: () => void;
@@ -28,9 +31,58 @@ export const SidebarHeader: React.FC<SidebarHeaderProps> = ({
   onExport,
   onClose,
 }) => {
-  // 是否显示切换到主控会话按钮：仅当绑定了主控时才显示
   const canSwitchToLead = Boolean(boundLeadSessionId) && Boolean(onSwitchToLeadSession);
   void _sessionTitle;
+
+  const [backendVersion, setBackendVersion] = useState<string>("-");
+  const [frontendVersion, setFrontendVersion] = useState<string>("-");
+  const [showVersionDetails, setShowVersionDetails] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchVersion = async () => {
+      try {
+        const data = await apiRequest<{ version?: string }>("/health");
+        if (!cancelled) {
+          setBackendVersion(formatVersionLabel(data.version));
+        }
+      } catch {
+        if (!cancelled) {
+          setBackendVersion("-");
+        }
+      }
+    };
+    void fetchVersion();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchFrontendVersion = async () => {
+      try {
+        const pkg = (await import("../../../../package.json")) as {
+          version?: string;
+        };
+        if (!cancelled) {
+          setFrontendVersion(formatVersionLabel(pkg.version));
+        }
+      } catch {
+        if (!cancelled) {
+          setFrontendVersion("-");
+        }
+      }
+    };
+    void fetchFrontendVersion();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleVersionDetails = useCallback(() => {
+    setShowVersionDetails((prev) => !prev);
+  }, []);
 
   return (
     <div className="border-b border-border bg-muted">
@@ -38,6 +90,13 @@ export const SidebarHeader: React.FC<SidebarHeaderProps> = ({
         <div className="flex items-center gap-2">
           <Terminal size={15} className="text-foreground" />
           <h2 className="text-sm font-semibold text-foreground">当前工作区</h2>
+          <button
+            onClick={toggleVersionDetails}
+            className="text-[11px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer px-1.5 py-0.5 rounded hover:bg-accent"
+            title="查看版本信息"
+          >
+            {backendVersion}
+          </button>
         </div>
         <div className="flex items-center gap-0.5">
           {sessionId ? (
@@ -67,6 +126,25 @@ export const SidebarHeader: React.FC<SidebarHeaderProps> = ({
           </button>
         </div>
       </div>
+
+      {showVersionDetails ? (
+        <div className="px-4 pb-3 pl-6 space-y-2 border-t border-border">
+          <div className="flex items-center justify-between py-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Server className="w-3.5 h-3.5" />
+              <span>服务端版本</span>
+            </div>
+            <code className="text-xs font-mono">{backendVersion}</code>
+          </div>
+          <div className="flex items-center justify-between py-1">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Monitor className="w-3.5 h-3.5" />
+              <span>客户端版本</span>
+            </div>
+            <code className="text-xs font-mono">{frontendVersion}</code>
+          </div>
+        </div>
+      ) : null}
 
       {sessionId && canSwitchToLead ? (
         <div

@@ -81,7 +81,7 @@ class PreviewHandler(http.server.SimpleHTTPRequestHandler):
         target = BACKEND + self.path
         length = int(self.headers.get("Content-Length", "0") or "0")
         # 对于大请求体，直接流式转发 self.rfile，避免在内存中缓冲整个 body
-        body = self.rfile if length > 0 else None
+        body = self.rfile.read(length) if length > 0 else None
 
         request = urllib.request.Request(target, data=body, method=self.command)
         for key, value in self.headers.items():
