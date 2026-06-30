@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from typing import Any
 
@@ -176,6 +177,12 @@ class AskUser(AiasysTool):
 
         session_id = current_session_id.get() or "unknown-session"
         user_id = current_user_id.get() or "unknown-user"
+
+        # Agent 模式：自动批准所有 AskUser 请求
+        if os.environ.get("AIASYS_AGENT_MODE") == "1":
+            logger.debug("Agent 模式自动批准 AskUser: request_id=%s", request.request_id)
+            yield ToolResult(content="agent_auto_approved", is_error=False)
+            return
 
         future = self._store.create_request(
             request=request,

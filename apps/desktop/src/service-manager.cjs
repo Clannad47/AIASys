@@ -53,21 +53,21 @@ function removeMacVenvQuarantine(writableVenv) {
   }
   return new Promise((resolve) => {
     console.log(
-      `[aiasys-desktop] 正在尝试移除 .venv 的 quarantine 属性: ${writableVenv}`,
+      `[aiasys] 正在尝试移除 .venv 的 quarantine 属性: ${writableVenv}`,
     );
     const child = spawn("xattr", ["-r", "-d", "com.apple.quarantine", writableVenv], {
       stdio: "ignore",
       detached: true,
     });
     child.once("error", (error) => {
-      console.warn(`[aiasys-desktop] 移除 quarantine 属性失败: ${error.message}`);
+      console.warn(`[aiasys] 移除 quarantine 属性失败: ${error.message}`);
       resolve();
     });
     child.once("exit", (code) => {
       if (code === 0) {
-        console.log(`[aiasys-desktop] 已移除 .venv 的 quarantine 属性`);
+        console.log(`[aiasys] 已移除 .venv 的 quarantine 属性`);
       } else {
-        console.warn(`[aiasys-desktop] 移除 quarantine 属性退出码: ${code}`);
+        console.warn(`[aiasys] 移除 quarantine 属性退出码: ${code}`);
       }
       resolve();
     });
@@ -96,7 +96,7 @@ function prewarmVenvPython(pythonExecutable) {
     if (!pythonExecutable || !fs.existsSync(pythonExecutable)) {
       return resolve();
     }
-    console.log(`[aiasys-desktop] 正在预热 Python 解释器: ${pythonExecutable}`);
+    console.log(`[aiasys] 正在预热 Python 解释器: ${pythonExecutable}`);
     const start = Date.now();
     const child = spawn(pythonExecutable, ["-c", "import sys; print(sys.version)"], {
       stdio: "ignore",
@@ -104,17 +104,17 @@ function prewarmVenvPython(pythonExecutable) {
       detached: true,
     });
     child.once("error", (error) => {
-      console.warn(`[aiasys-desktop] Python 预热失败: ${error.message}`);
+      console.warn(`[aiasys] Python 预热失败: ${error.message}`);
       resolve();
     });
     child.once("exit", (code) => {
       if (code === 0) {
         console.log(
-          `[aiasys-desktop] Python 预热完成，耗时 ${Date.now() - start}ms`,
+          `[aiasys] Python 预热完成，耗时 ${Date.now() - start}ms`,
         );
       } else {
         console.warn(
-          `[aiasys-desktop] Python 预热退出码: ${code}，耗时 ${Date.now() - start}ms`,
+          `[aiasys] Python 预热退出码: ${code}，耗时 ${Date.now() - start}ms`,
         );
       }
       resolve();
@@ -167,7 +167,7 @@ async function extractVenvArchive(archivePath, runtimeStateRoot, totalEntries, o
     }
   }
 
-  console.log(`[aiasys-desktop] 解压 .venv: ${archivePath} -> ${runtimeStateRoot}`);
+  console.log(`[aiasys] 解压 .venv: ${archivePath} -> ${runtimeStateRoot}`);
   await tar.extract({
     file: archivePath,
     cwd: runtimeStateRoot,
@@ -183,7 +183,7 @@ async function extractVenvArchive(archivePath, runtimeStateRoot, totalEntries, o
   reportProgress(true);
 
   console.log(
-    `[aiasys-desktop] .venv 解压完成，${extracted} 个条目，耗时 ${Date.now() - start}ms`,
+    `[aiasys] .venv 解压完成，${extracted} 个条目，耗时 ${Date.now() - start}ms`,
   );
 }
 
@@ -198,11 +198,11 @@ async function copyVenvFallback(backendRoot, runtimeStateRoot) {
     return;
   }
 
-  console.log(`[aiasys-desktop] 复制 .venv 到可写目录: ${writableVenv}`);
+  console.log(`[aiasys] 复制 .venv 到可写目录: ${writableVenv}`);
   const copyStart = Date.now();
   await fs.promises.cp(readOnlyVenv, writableVenv, { recursive: true, dereference: true });
   console.log(
-    `[aiasys-desktop] .venv 复制完成，耗时 ${Date.now() - copyStart}ms`,
+    `[aiasys] .venv 复制完成，耗时 ${Date.now() - copyStart}ms`,
   );
 }
 
@@ -228,8 +228,123 @@ function isVenvReady(writableVenv) {
 }
 
 /**
+ * 根据平台与架构解析 backendRoot 下 bundled uv 的绝对路径。
+ * 与 DesktopServiceManager._bundledUvPath() 逻辑一致，但以独立函数形式
+ * 供 preparePackagedVenv / bootstrapVenvFromScratch 等静态函数复用。
+ */
+function resolveBundledUvPath(backendRoot) {
+  if (!backendRoot) {
+    return null;
+  }
+  const platformDirMap = {
+    "darwin-arm64": "darwin-arm64",
+    "darwin-x64": "darwin-x64",
+    "linux-arm64": "linux-arm64",
+    "linux-x64": "linux-x64",
+    "win32-x64": "windows-x64",
+  };
+  const key = `${process.platform}-${process.arch}`;
+  const dir = platformDirMap[key];
+  if (!dir) {
+    console.warn(`[aiasys] 未支持的内置 uv 平台: ${key}`);
+    return null;
+  }
+  const uvName = process.platform === "win32" ? "uv.exe" : "uv";
+  return path.join(backendRoot, "vendor", "uv", dir, uvName);
+}
+
+/**
+ * Light/Portable 模式：从零创建 Python 虚拟环境。
+ *
+ * 使用 bundled uv 依次执行：
+ * 1. uv python install 3.12  — 下载 python-build-standalone
+ * 2. uv venv               — 在 runtimeStateRoot 下创建 .venv
+ * 3. uv sync               — 安装 pyproject.toml 中声明的全部依赖
+ *
+ * 每一步通过 onProgress 回调报告进度，供 splash 界面展示。
+ */
+async function bootstrapVenvFromScratch(backendRoot, runtimeStateRoot, onProgress) {
+  const bundledUv = resolveBundledUvPath(backendRoot);
+  if (!bundledUv || !fs.existsSync(bundledUv)) {
+    throw new Error(
+      "Light/Portable 模式需要 bundled uv 来创建 Python 环境，" +
+        "但未找到 uv 二进制。请确认 vendor/uv 目录已正确打包。",
+    );
+  }
+
+  const writableVenv = path.join(runtimeStateRoot, ".venv");
+  const isWindows = process.platform === "win32";
+  const spawnOpts = {
+    encoding: "utf-8",
+    stdio: "pipe",
+    windowsHide: isWindows,
+  };
+
+  // 允许 uv 使用项目级缓存加速后续 workspace 环境创建
+  const uvEnv = { ...process.env };
+  // 清除可能干扰 bootstrap 的虚拟环境变量
+  delete uvEnv.VIRTUAL_ENV;
+  delete uvEnv.PYTHONHOME;
+
+  // Step 1: 下载 Python 运行时
+  console.log("[aiasys] Light 模式: 正在下载 Python 3.12...");
+  onProgress?.({ message: "正在下载 Python 运行时...", step: "python", percent: 5 });
+
+  const pythonInstallResult = spawnSync(
+    bundledUv,
+    ["python", "install", "3.12"],
+    { ...spawnOpts, timeout: 300_000, env: uvEnv },
+  );
+  if (pythonInstallResult.status !== 0) {
+    const detail = pythonInstallResult.stderr || pythonInstallResult.error || `exit ${pythonInstallResult.status}`;
+    throw new Error(`uv python install 3.12 失败: ${detail}`);
+  }
+  console.log("[aiasys] Python 3.12 下载完成");
+
+  // Step 2: 创建 venv
+  console.log(`[aiasys] Light 模式: 正在创建虚拟环境: ${writableVenv}`);
+  onProgress?.({ message: "正在创建虚拟环境...", step: "venv", percent: 35 });
+
+  const venvResult = spawnSync(
+    bundledUv,
+    ["venv", writableVenv, "--python", "3.12"],
+    { ...spawnOpts, timeout: 120_000, env: uvEnv },
+  );
+  if (venvResult.status !== 0) {
+    const detail = venvResult.stderr || venvResult.error || `exit ${venvResult.status}`;
+    throw new Error(`uv venv 失败: ${detail}`);
+  }
+  console.log("[aiasys] 虚拟环境创建完成");
+
+  // Step 3: 安装依赖
+  console.log("[aiasys] Light 模式: 正在安装 Python 依赖...");
+  onProgress?.({ message: "正在安装 Python 依赖...", step: "deps", percent: 65 });
+
+  const syncEnv = { ...uvEnv, VIRTUAL_ENV: writableVenv };
+  const syncResult = spawnSync(
+    bundledUv,
+    ["sync"],
+    { ...spawnOpts, timeout: 600_000, cwd: backendRoot, env: syncEnv },
+  );
+  if (syncResult.status !== 0) {
+    const detail = syncResult.stderr || syncResult.error || `exit ${syncResult.status}`;
+    throw new Error(`uv sync 失败: ${detail}`);
+  }
+
+  const elapsed = Date.now();
+  console.log(`[aiasys] Python 依赖安装完成`);
+
+  onProgress?.({ message: "Python 环境就绪", step: "done", percent: 100 });
+}
+
+/**
  * 将 app bundle 中的 .venv 准备到可写运行时目录。
- * 优先使用压缩包解压，失败或无压缩包时回退到逐文件复制。
+ * 级联降级策略：
+ *   1. Full 模式：优先解压 .venv.tar.gz
+ *   2. 降级兜底：逐文件复制 backendRoot/.venv
+ *   3. Light/Portable 模式：前两步都失败时，用 bundled uv 从零创建
+ *
+ * 每步失败后自动尝试下一级，确保最终一定能得到一个可用的 .venv。
  */
 async function preparePackagedVenv(backendRoot, runtimeStateRoot, onProgress) {
   const writableVenv = path.join(runtimeStateRoot, ".venv");
@@ -240,18 +355,21 @@ async function preparePackagedVenv(backendRoot, runtimeStateRoot, onProgress) {
   // 如果目录存在但不完整，清理后重新准备
   if (fs.existsSync(writableVenv)) {
     console.warn(
-      `[aiasys-desktop] .venv 目录存在但不完整，将重新准备: ${writableVenv}`,
+      `[aiasys] .venv 目录存在但不完整，将重新准备: ${writableVenv}`,
     );
     try {
       fs.rmSync(writableVenv, { recursive: true, force: true });
     } catch (error) {
-      console.warn(`[aiasys-desktop] 清理不完整 .venv 失败: ${error.message}`);
+      console.warn(`[aiasys] 清理不完整 .venv 失败: ${error.message}`);
     }
   }
 
   const archivePath = path.join(backendRoot, ".venv.tar.gz");
   const hasArchive = fs.existsSync(archivePath);
+  const readOnlyVenv = path.join(backendRoot, ".venv");
+  const hasReadOnlyVenv = fs.existsSync(readOnlyVenv);
 
+  // Step 1: 尝试解压 .venv.tar.gz（Full 模式主路径）
   if (hasArchive) {
     const manifest = readVenvManifest(backendRoot);
     const totalEntries = manifest ? manifest.entries : 0;
@@ -264,9 +382,9 @@ async function preparePackagedVenv(backendRoot, runtimeStateRoot, onProgress) {
       );
     } catch (error) {
       console.warn(
-        `[aiasys-desktop] .venv 解压失败，回退到逐文件复制: ${error.message}`,
+        `[aiasys] .venv 解压失败: ${error.message}`,
       );
-      // 清理可能不完整的解压产物
+      // 清理可能不完整的解压产物，但不阻塞后续降级
       try {
         if (fs.existsSync(writableVenv)) {
           fs.rmSync(writableVenv, { recursive: true, force: true });
@@ -274,14 +392,23 @@ async function preparePackagedVenv(backendRoot, runtimeStateRoot, onProgress) {
       } catch {
         // ignore
       }
-      await copyVenvFallback(backendRoot, runtimeStateRoot);
     }
-  } else {
+  }
+
+  // Step 2: 解压失败或不存在压缩包时，尝试逐文件复制（Full 模式降级路径）
+  if (!isVenvReady(writableVenv) && hasReadOnlyVenv) {
     await copyVenvFallback(backendRoot, runtimeStateRoot);
   }
 
+  // Step 3: 前两步都失败时，从零创建（Light/Portable 模式）
+  // 包括：无压缩包且无 .venv 目录，或压缩包解压失败且无 .venv 目录可降级
+  if (!isVenvReady(writableVenv)) {
+    console.log("[aiasys] Light/Portable 模式: 未找到内嵌 .venv，将从零创建 Python 环境");
+    await bootstrapVenvFromScratch(backendRoot, runtimeStateRoot, onProgress);
+  }
+
   fixPyvenvHomeIfNeeded(writableVenv);
-  console.log(`[aiasys-desktop] .venv 就绪（可写副本）`);
+  console.log(`[aiasys] .venv 就绪（可写副本）`);
 
   // macOS: 复制/解压后的 Mach-O 二进制可能仍携带 quarantine 属性，尝试清理
   await removeMacVenvQuarantine(writableVenv);
@@ -311,11 +438,11 @@ function resolvePythonExecutable(backendRoot) {
     if (fs.existsSync(candidate)) {
       const validation = validatePythonExecutable(candidate);
       if (validation.ok) {
-        console.log(`[aiasys-desktop] Python 解释器验证通过: ${candidate} (${validation.version})`);
+        console.log(`[aiasys] Python 解释器验证通过: ${candidate} (${validation.version})`);
         return candidate;
       }
       console.warn(
-        `[aiasys-desktop] Python 解释器存在但无法执行: ${candidate}\n` +
+        `[aiasys] Python 解释器存在但无法执行: ${candidate}\n` +
           `  错误: ${validation.error}\n` +
           `  提示: macOS/Linux 上请使用 "uv python install 3.12" 安装 python-build-standalone，` +
           `避免使用依赖系统框架的 Python 发行版。`,
@@ -620,7 +747,7 @@ async function waitForUrl(url, label, timeoutMs = 90_000, childProcesses = [], o
         // 若子进程配置了自动重启且未耗尽，继续等待重启后的新进程替换旧引用
         if (child.__autoRestart && !child.__restartExhausted) {
           console.warn(
-            `[aiasys-desktop] ${label} 子进程已退出，但配置了自动重启，继续等待服务就绪: ${url}`,
+            `[aiasys] ${label} 子进程已退出，但配置了自动重启，继续等待服务就绪: ${url}`,
           );
           continue;
         }
@@ -633,7 +760,7 @@ async function waitForUrl(url, label, timeoutMs = 90_000, childProcesses = [], o
 
     if (await probeUrl(url)) {
       console.log(
-        `[aiasys-desktop] ${label} 已就绪，耗时 ${Date.now() - start}ms: ${url}`,
+        `[aiasys] ${label} 已就绪，耗时 ${Date.now() - start}ms: ${url}`,
       );
       return;
     }
@@ -669,7 +796,7 @@ function createLogStream(logFilePath) {
   rotateLogFile(logFilePath);
   const stream = fs.createWriteStream(logFilePath, { flags: "a" });
   stream.on("error", (error) => {
-    console.error(`[aiasys-desktop] 日志流写入失败 ${logFilePath}:`, error);
+    console.error(`[aiasys] 日志流写入失败 ${logFilePath}:`, error);
   });
   const now = new Date().toISOString();
   stream.write(`\n[${now}] === 日志开始 ===\n`);
@@ -740,7 +867,7 @@ function spawnManagedProcess(name, command, args, options) {
       try {
         logStream = createLogStream(options.__logFilePath);
       } catch (error) {
-        console.error(`[aiasys-desktop] 无法创建日志文件 ${options.__logFilePath}:`, error);
+        console.error(`[aiasys] 无法创建日志文件 ${options.__logFilePath}:`, error);
       }
     }
 
@@ -757,7 +884,7 @@ function spawnManagedProcess(name, command, args, options) {
     }
 
     child.once("error", (error) => {
-      console.error(`[aiasys-desktop] ${name} 启动失败:`, error);
+      console.error(`[aiasys] ${name} 启动失败:`, error);
       child.__spawnFailed = true;
       if (logStream && !logStream.destroyed) {
         logStream.write(`[${name}] 启动失败: ${error.message}\n`);
@@ -783,7 +910,7 @@ function spawnManagedProcess(name, command, args, options) {
       }
 
       console.error(
-        `[aiasys-desktop] ${name} 提前退出: code=${code ?? "null"} signal=${signal ?? "null"}`,
+        `[aiasys] ${name} 提前退出: code=${code ?? "null"} signal=${signal ?? "null"}`,
       );
 
       // 通知崩溃
@@ -800,7 +927,7 @@ function spawnManagedProcess(name, command, args, options) {
       if (autoRestart && restartCount < maxRestarts && canRestart()) {
         restartCount++;
         console.log(
-          `[aiasys-desktop] ${name} 将在 2 秒后自动重启 (${restartCount}/${maxRestarts})...`,
+          `[aiasys] ${name} 将在 2 秒后自动重启 (${restartCount}/${maxRestarts})...`,
         );
         if (logStream && !logStream.destroyed) {
           logStream.write(
@@ -810,7 +937,7 @@ function spawnManagedProcess(name, command, args, options) {
 
         setTimeout(() => {
           if (!canRestart()) {
-            console.log(`[aiasys-desktop] ${name} 重启已取消（正在关闭）`);
+            console.log(`[aiasys] ${name} 重启已取消（正在关闭）`);
             child.__restartExhausted = true;
             return;
           }
@@ -821,7 +948,7 @@ function spawnManagedProcess(name, command, args, options) {
         }, 2000);
       } else if (autoRestart) {
         console.error(
-          `[aiasys-desktop] ${name} 已达最大重启次数 (${maxRestarts})，不再重启`,
+          `[aiasys] ${name} 已达最大重启次数 (${maxRestarts})，不再重启`,
         );
         child.__restartExhausted = true;
         if (typeof options?.onCrash === "function") {
@@ -894,7 +1021,7 @@ async function terminateChild(child) {
   }
 
   if (!child.killed && child.exitCode === null) {
-    console.warn(`[aiasys-desktop] 子进程 SIGTERM 未退出，发送 SIGKILL: ${child.pid}`);
+    console.warn(`[aiasys] 子进程 SIGTERM 未退出，发送 SIGKILL: ${child.pid}`);
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch {
@@ -978,12 +1105,25 @@ class DesktopServiceManager {
       });
     }
 
+    // 用户导入的 skill / capability 源必须位于可写运行时目录（AppImage 等资源目录只读）
+    const writableSourceDirs = [
+      { src: path.join(this.backendRoot, "skills", "store"), dst: path.join(this.runtimeStateRoot, "skills", "store") },
+      { src: path.join(this.backendRoot, "capability_sources", "store"), dst: path.join(this.runtimeStateRoot, "capability_sources", "store") },
+    ];
+    for (const { src, dst } of writableSourceDirs) {
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        this._emitStatus({ message: `正在复制 ${path.basename(path.dirname(src))}...`, step: 2, total: 5 });
+        await fs.promises.cp(src, dst, { recursive: true, preserveTimestamps: true });
+      }
+      fs.mkdirSync(dst, { recursive: true });
+    }
+
     fs.mkdirSync(this.backendDataRoot, { recursive: true });
     fs.mkdirSync(this.backendLogsRoot, { recursive: true });
     fs.mkdirSync(this.backendWorkspacesRoot, { recursive: true });
 
     console.log(
-      `[aiasys-desktop] packaged runtime root: ${this.runtimeStateRoot}`,
+      `[aiasys] packaged runtime root: ${this.runtimeStateRoot}`,
     );
   }
 
@@ -1018,7 +1158,7 @@ class DesktopServiceManager {
         return fs.readFileSync(secretPath, "utf-8").trim();
       }
     } catch (error) {
-      console.warn(`[aiasys-desktop] 读取 JWT secret 失败: ${error.message}`);
+      console.warn(`[aiasys] 读取 JWT secret 失败: ${error.message}`);
     }
 
     const secret = crypto.randomBytes(32).toString("hex");
@@ -1032,7 +1172,7 @@ class DesktopServiceManager {
         // ignore on Windows
       }
     } catch (error) {
-      console.warn(`[aiasys-desktop] 持久化 JWT secret 失败: ${error.message}`);
+      console.warn(`[aiasys] 持久化 JWT secret 失败: ${error.message}`);
     }
     return secret;
   }
@@ -1074,7 +1214,7 @@ class DesktopServiceManager {
       const sep = process.platform === "win32" ? ";" : ":";
       const existing = process.env.PYTHONPATH || "";
       env.PYTHONPATH = existing ? `${sitePackages}${sep}${existing}` : sitePackages;
-      console.log(`[aiasys-desktop] PYTHONPATH: ${sitePackages}`);
+      console.log(`[aiasys] PYTHONPATH: ${sitePackages}`);
     }
 
     return { ...env, ...extraEnv };
@@ -1084,24 +1224,7 @@ class DesktopServiceManager {
    * 构建 backend 子进程环境变量，附加桌面模式标识。
    */
   _bundledUvPath() {
-    if (!this.backendRoot) {
-      return null;
-    }
-    const platformDirMap = {
-      "darwin-arm64": "darwin-arm64",
-      "darwin-x64": "darwin-x64",
-      "linux-arm64": "linux-arm64",
-      "linux-x64": "linux-x64",
-      "win32-x64": "windows-x64",
-    };
-    const key = `${process.platform}-${process.arch}`;
-    const dir = platformDirMap[key];
-    if (!dir) {
-      console.warn(`[aiasys-desktop] 未支持的内置 uv 平台: ${key}`);
-      return null;
-    }
-    const uvName = process.platform === "win32" ? "uv.exe" : "uv";
-    return path.join(this.backendRoot, "vendor", "uv", dir, uvName);
+    return resolveBundledUvPath(this.backendRoot);
   }
 
   _bundledFnmPath() {
@@ -1118,7 +1241,7 @@ class DesktopServiceManager {
     const key = `${process.platform}-${process.arch}`;
     const dir = platformDirMap[key];
     if (!dir) {
-      console.warn(`[aiasys-desktop] 未支持的内置 fnm 平台: ${key}`);
+      console.warn(`[aiasys] 未支持的内置 fnm 平台: ${key}`);
       return null;
     }
     const fnmName = process.platform === "win32" ? "fnm.exe" : "fnm";
@@ -1145,6 +1268,7 @@ class DesktopServiceManager {
     return this._buildPythonEnv({
       AIASYS_DESKTOP_MODE: "1",
       AIASYS_AUTH_JWT_SECRET: this._ensureJwtSecret(),
+      ELECTRON_DISABLE_SANDBOX: process.env.ELECTRON_DISABLE_SANDBOX || "1",
       ...bundledUvEnv,
       ...bundledFnmEnv,
       ...fnmDataEnv,
@@ -1200,16 +1324,17 @@ class DesktopServiceManager {
       await preparePackagedVenv(
         this.backendRoot,
         this.runtimeStateRoot,
-        ({ percent }) => {
+        (event) => {
+          // 使用 bootstrap 提供的消息文本，兜底用解压消息
+          const message = event.message || `正在解压 Python 运行环境... ${event.percent || 0}%`;
           this._emitStatus({
-            message: `正在解压 Python 运行环境... ${percent}%`,
+            message,
             step: 1,
             total: 5,
-            percent,
+            percent: event.percent,
           });
         },
       );
-      fixPyvenvHomeIfNeeded(this.runtimeStateRoot);
     }
 
     this._emitStatus({ message: "正在初始化本地工作区...", step: 2, total: 5 });
@@ -1225,7 +1350,7 @@ class DesktopServiceManager {
     const backendHealthUrl = `${this.backendBaseUrl}/health`;
 
     if (backendResolution.reuse) {
-      console.log(`[aiasys-desktop] 复用现有 backend: ${backendHealthUrl}`);
+      console.log(`[aiasys] 复用现有 backend: ${backendHealthUrl}`);
       return;
     }
 
@@ -1237,7 +1362,7 @@ class DesktopServiceManager {
     await prewarmVenvPython(pythonExecutable);
 
     this._emitStatus({ message: "正在启动本地服务...", step: 3, total: 5 });
-    console.log("[aiasys-desktop] 启动 backend ...");
+    console.log("[aiasys] 启动 backend ...");
 
     // 用于跟踪当前 backend 子进程引用，重启后更新
     let currentBackendChild = null;
@@ -1249,7 +1374,7 @@ class DesktopServiceManager {
       pythonExecutable,
       ["-m", "uvicorn", "app.main:app", "--host", this.host, "--port", String(this.backendPort)],
       {
-        cwd: this.backendRoot,
+        cwd: fs.existsSync(this.backendRoot) ? this.backendRoot : this.runtimeStateRoot,
         env: this.buildBackendEnv({
           AIASYS_RUNTIME_ROOT: this.runtimeStateRoot || this.backendRoot,
         }),
@@ -1257,7 +1382,7 @@ class DesktopServiceManager {
         autoRestart: true,
         canRestart: () => !this.isShuttingDown,
         onCrash: (info) => {
-          console.error(`[aiasys-desktop] backend 崩溃: ${JSON.stringify(info)}`);
+          console.error(`[aiasys] backend 崩溃: ${JSON.stringify(info)}`);
           if (typeof this.onBackendCrash === "function") {
             this.onBackendCrash(info);
           }
@@ -1283,7 +1408,7 @@ class DesktopServiceManager {
             signal: backendReadyToken,
           })
             .then(() => {
-              console.log("[aiasys-desktop] backend 重启后已就绪");
+              console.log("[aiasys] backend 重启后已就绪");
               if (typeof this.onBackendReady === "function") {
                 this.onBackendReady();
               }
@@ -1293,7 +1418,7 @@ class DesktopServiceManager {
                 // 旧的等待被新的重启取消，属于正常流程，不通知前端
                 return;
               }
-              console.error("[aiasys-desktop] backend 重启后健康检查失败:", err);
+              console.error("[aiasys] backend 重启后健康检查失败:", err);
               if (typeof this.onBackendCrash === "function") {
                 this.onBackendCrash({ exitCode: null, signal: null, error: err.message });
               }
@@ -1323,13 +1448,13 @@ class DesktopServiceManager {
     const frontendUrl = `${this.rendererBaseUrl}/`;
 
     if (frontendResolution.reuse) {
-      console.log(`[aiasys-desktop] 复用现有 frontend: ${frontendUrl}`);
+      console.log(`[aiasys] 复用现有 frontend: ${frontendUrl}`);
       return;
     }
 
     if (this.mode === "preview") {
       this.ensureBuiltRenderer();
-      console.log("[aiasys-desktop] 启动 preview frontend ...");
+      console.log("[aiasys] 启动 preview frontend ...");
       const pythonExecutable = resolvePythonExecutable(this._getVenvRoot());
       const child = spawnManagedProcess(
         "frontend-preview",
@@ -1353,7 +1478,7 @@ class DesktopServiceManager {
       return;
     }
 
-    console.log("[aiasys-desktop] 启动 Vite frontend ...");
+    console.log("[aiasys] 启动 Vite frontend ...");
     const npmCommand = resolveNpmCommand();
     const child = spawnManagedProcess(
       "frontend-dev",
@@ -1396,4 +1521,6 @@ module.exports = {
   _readVenvManifest: readVenvManifest,
   _extractVenvArchive: extractVenvArchive,
   _preparePackagedVenv: preparePackagedVenv,
+  _bootstrapVenvFromScratch: bootstrapVenvFromScratch,
+  _resolveBundledUvPath: resolveBundledUvPath,
 };

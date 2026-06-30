@@ -1,5 +1,13 @@
 const fs = require("fs");
 const path = require("path");
+
+// Linux (Ubuntu 23.10+/AppArmor) 默认阻止 unprivileged user namespace，
+// 必须在 require('electron') 之前设置该环境变量，否则 zygote 初始化阶段会 FATAL。
+// 该环境变量在 Windows/macOS 上无实际作用，因此按平台隔离即可保持兼容。
+if (process.platform === "linux") {
+  process.env.ELECTRON_DISABLE_SANDBOX = process.env.ELECTRON_DISABLE_SANDBOX || "1";
+}
+
 const { app, BrowserWindow, dialog, ipcMain, shell, Tray, Menu, nativeImage } = require("electron");
 const { DesktopServiceManager } = require("./service-manager.cjs");
 
@@ -16,15 +24,18 @@ process.on("uncaughtException", (error) => {
 
 const desktopMode =
   process.env.AIASYS_DESKTOP_MODE || (app.isPackaged ? "preview" : "dev");
+const agentMode = process.env.AIASYS_AGENT_MODE === "1";
 // 确保 renderer/preload 继承的 mode 与主进程计算结果一致
 process.env.AIASYS_DESKTOP_MODE = desktopMode;
 const openDevTools =
   desktopMode === "dev" && process.env.AIASYS_DESKTOP_OPEN_DEVTOOLS !== "0";
 const startPath = process.env.AIASYS_DESKTOP_START_PATH || "/analysis";
 const remoteDebuggingPort = process.env.AIASYS_DESKTOP_REMOTE_DEBUGGING_PORT;
-const disableGpu =
+const isSafeMode =
+  app.commandLine.hasSwitch("disable-gpu") ||
   process.env.AIASYS_DESKTOP_DISABLE_GPU === "1" ||
   (!process.env.DISPLAY && process.platform === "linux");
+const disableGpu = isSafeMode;
 const runtimeStateRoot = process.env.AIASYS_DESKTOP_HOME
   || path.join(app.getPath("userData"), "backend-runtime");
 
@@ -44,7 +55,20 @@ if (remoteDebuggingPort) {
 
 if (disableGpu) {
   app.commandLine.appendSwitch("disable-gpu");
+  app.commandLine.appendSwitch("disable-gpu-compositing");
+  app.commandLine.appendSwitch("disable-gpu-rasterization");
+  app.commandLine.appendSwitch("disable-gpu-sandbox");
+  app.commandLine.appendSwitch("use-gl", "swiftshader-webgl");
+  app.commandLine.appendSwitch("use-angle", "swiftshader");
+  app.commandLine.appendSwitch("disable-d3d11");
+  app.commandLine.appendSwitch("disable-direct-composition");
+  app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion,HardwareMediaKeyHandling");
+  app.commandLine.appendSwitch("no-sandbox");
+  app.commandLine.appendSwitch("disable-setuid-sandbox");
+  app.commandLine.appendSwitch("disable-namespace-sandbox");
+  app.commandLine.appendSwitch("disable-dev-shm-usage");
   app.disableHardwareAcceleration();
+  console.log("[aiasys-desktop] GPU disabled, using software rendering and relaxed sandbox");
 }
 
 function isWSL() {
@@ -58,13 +82,18 @@ function isWSL() {
   }
 }
 
+function isAgentMode() {
+  return agentMode;
+}
+
 if (process.platform === "linux") {
   app.commandLine.appendSwitch("no-sandbox");
-  if (isWSL()) {
-    // WSLg 下 Chromium zygote 无法访问 /dev/shm，需要关闭 namespace/setuid sandbox
-    app.commandLine.appendSwitch("disable-namespace-sandbox");
-    app.commandLine.appendSwitch("disable-setuid-sandbox");
-  }
+  // Ubuntu 23.10+ AppArmor 默认阻止 unprivileged user namespace，
+  // 同时关闭 namespace/setuid sandbox 避免 FATAL:zygote_linux。
+  app.commandLine.appendSwitch("disable-namespace-sandbox");
+  app.commandLine.appendSwitch("disable-setuid-sandbox");
+  // /dev/shm 在 WSLg/容器/低内存环境可能不足或不可写，显式禁用。
+  app.commandLine.appendSwitch("disable-dev-shm-usage");
 }
 
 // Windows 任务栏需要稳定的 AppUserModelID，否则运行中窗口会被识别为 Electron 默认图标
@@ -327,7 +356,7 @@ function createSplashWindow() {
 <body>
   <div class="container">
     <div class="spinner"></div>
-    <div class="logo">AIASys Desktop</div>
+    <div class="logo">AIASys</div>
     <div class="status" id="status">正在启动...</div>
     <div class="step-text" id="step-text"></div>
     <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
@@ -451,7 +480,10 @@ async function waitForBackendSession(backendBaseUrl, timeoutMs = 15_000) {
 
 function createMainWindow(rendererBaseUrl) {
   const preloadPath = path.join(__dirname, "preload.cjs");
-  const initialUrl = new URL(startPath, rendererBaseUrl).toString();
+  // 桌面版加载 dist 根路径，让前端路由自己处理 startPath；
+  // 直接加载 /analysis 会导致绝对路径的 /assets/... 被浏览器相对于当前路径解析（或
+  // preview server 把不存在的 /analysis/assets/... 回退成 index.html），页面白屏。
+  const initialUrl = new URL("/", rendererBaseUrl).toString();
   // 把后端地址通过命令行参数注入 renderer，供 preload 暴露给前端。
   // 这样 WebSocket 等需要直连后端的场景不必依赖页面同源或 preview server 代理。
   const backendBaseUrl = serviceManager ? serviceManager.backendBaseUrl : "";
@@ -466,7 +498,7 @@ function createMainWindow(rendererBaseUrl) {
     minHeight: 720,
     autoHideMenuBar: true,
     show: false,
-    title: "AIASys Desktop",
+    title: "AIASys",
     icon: getWindowIcon(),
     webPreferences: {
       preload: preloadPath,
@@ -495,10 +527,30 @@ function createMainWindow(rendererBaseUrl) {
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error("[aiasys-desktop] render process gone:", details);
     closeSplashWindow();
-    dialog.showErrorBox(
-      "AIASys Desktop",
-      "渲染进程异常退出，应用将尝试重新加载页面。",
-    );
+
+    // 首次渲染进程崩溃时，自动以禁用 GPU/沙箱的安全模式重启一次
+    if (
+      (details.reason === "crashed" || details.reason === "killed") &&
+      !isSafeMode
+    ) {
+      console.error("[aiasys-desktop] 检测到渲染进程崩溃，将以安全模式重启");
+      if (!isAgentMode()) {
+        dialog.showErrorBox(
+          "AIASys",
+          "检测到图形渲染兼容性问题，应用将以兼容模式重新启动。",
+        );
+      }
+      app.relaunch({ args: [...process.argv.slice(1), "--disable-gpu"] });
+      app.exit(1);
+      return;
+    }
+
+    if (!isAgentMode()) {
+      dialog.showErrorBox(
+        "AIASys",
+        "渲染进程异常退出，应用将尝试重新加载页面。",
+      );
+    }
     if (mainWindow && !mainWindow.isDestroyed() && serviceManager) {
       mainWindow.loadURL(serviceManager.rendererBaseUrl).catch((err) => {
         console.error("[aiasys-desktop] 重新加载渲染页面失败:", err);
@@ -538,10 +590,12 @@ function createMainWindow(rendererBaseUrl) {
           validatedUrl,
         });
         closeSplashWindow();
-        dialog.showErrorBox(
-          "AIASys Desktop 加载失败",
-          `无法加载页面：${validatedUrl || initialUrl}\n错误：${errorDescription} (${errorCode})\n\n请检查日志目录获取详细信息。`,
-        );
+        if (!isAgentMode()) {
+          dialog.showErrorBox(
+            "AIASys 加载失败",
+            `无法加载页面：${validatedUrl || initialUrl}\n错误：${errorDescription} (${errorCode})\n\n请检查日志目录获取详细信息。`,
+          );
+        }
       }
     },
   );
@@ -652,7 +706,7 @@ function createTray() {
     return;
   }
   tray = new Tray(icon);
-  tray.setToolTip("AIASys Desktop");
+  tray.setToolTip("AIASys");
 
   const contextMenu = Menu.buildFromTemplate([
     {
@@ -794,6 +848,11 @@ ipcMain.handle("aiasys:select-folder", async (_event, options = {}) => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return { canceled: true, filePaths: [] };
   }
+  // Agent 模式：不阻塞等待用户选择，直接返回取消
+  if (isAgentMode()) {
+    console.log("[aiasys-desktop] agent mode: auto-cancel select-folder");
+    return { canceled: true, filePaths: [] };
+  }
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ["openDirectory"],
     title: options.title || "选择文件夹",
@@ -831,7 +890,11 @@ app.whenReady().then(() => {
       error instanceof Error ? error.stack || error.message : String(error);
     const fullMessage = `${errorMessage}\n\n日志目录: ${logsDir}`;
 
-    dialog.showErrorBox("AIASys Desktop 启动失败", fullMessage);
+    if (!isAgentMode()) {
+      dialog.showErrorBox("AIASys 启动失败", fullMessage);
+    } else {
+      console.error("[aiasys-desktop] bootstrap failed in agent mode:", fullMessage);
+    }
 
     // 尝试打开日志目录
     try {
