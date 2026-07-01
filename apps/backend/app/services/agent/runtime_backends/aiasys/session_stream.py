@@ -22,8 +22,10 @@ from app.services.agent.authorization import (
 from app.services.agent.errors import RunCancelled
 from app.services.agent.message_content import (
     downgrade_message_content_for_history,
+    extract_message_text,
     hydrate_message_images,
 )
+from app.services.history.session_history_projection import unwrap_user_prompt
 
 from ..base import AgentRuntimeEvent
 from .llm_clients.error_classifier import classify_api_error
@@ -129,9 +131,7 @@ class SessionStreamMixin:
             item["arguments"],
         )
         if loop_warning:
-            events.append(
-                AgentRuntimeEvent(kind="system_warning", text=loop_warning)
-            )
+            events.append(AgentRuntimeEvent(kind="system_warning", text=loop_warning))
             tool_result = ToolResult(content=loop_warning, is_error=True)
             events.append(
                 AgentRuntimeEvent(
@@ -179,17 +179,9 @@ class SessionStreamMixin:
         )
         tool = self._tool_registry._tools.get(resolved_tool_name)
 
-        tool_risk = (
-            getattr(tool, "risk_level", "medium") if tool is not None else "medium"
-        )
-        tool_scope = (
-            getattr(tool, "effect_scope", "workspace")
-            if tool is not None
-            else "workspace"
-        )
-        tool_side_effect = (
-            getattr(tool, "side_effect", True) if tool is not None else True
-        )
+        tool_risk = getattr(tool, "risk_level", "medium") if tool is not None else "medium"
+        tool_scope = getattr(tool, "effect_scope", "workspace") if tool is not None else "workspace"
+        tool_side_effect = getattr(tool, "side_effect", True) if tool is not None else True
 
         auth_mode_str = self._spec.authorization_mode
         if self._spec.yolo and auth_mode_str == "smart":
@@ -319,16 +311,11 @@ class SessionStreamMixin:
             )
             while True:
                 try:
-                    stream_event = await asyncio.wait_for(
-                        stream_gen.__anext__(), timeout=300
-                    )
+                    stream_event = await asyncio.wait_for(stream_gen.__anext__(), timeout=300)
                 except StopAsyncIteration:
                     break
 
-                if (
-                    stream_event.kind == "event"
-                    and stream_event.runtime_event is not None
-                ):
+                if stream_event.kind == "event" and stream_event.runtime_event is not None:
                     from .session_utils import wrap_subagent_event
 
                     wrapped = wrap_subagent_event(
@@ -340,9 +327,7 @@ class SessionStreamMixin:
                     final_tool_result = stream_event.tool_result
                     break
 
-            tool_result = final_tool_result or ToolResult(
-                content="无结果", is_error=True
-            )
+            tool_result = final_tool_result or ToolResult(content="无结果", is_error=True)
         except asyncio.TimeoutError:
             logger.warning(
                 "工具执行超时(300秒): session=%s tool=%s",
@@ -429,14 +414,10 @@ class SessionStreamMixin:
         async def run_one(
             info: dict[str, Any],
         ) -> tuple[dict[str, Any], list[AgentRuntimeEvent], ToolResult]:
-            events, tool_result = await self._execute_tool_stream(
-                info["item"], info["item_ctx"]
-            )
+            events, tool_result = await self._execute_tool_stream(info["item"], info["item_ctx"])
             return info, events, tool_result
 
-        results = await asyncio.gather(
-            *(asyncio.create_task(run_one(info)) for info in infos)
-        )
+        results = await asyncio.gather(*(asyncio.create_task(run_one(info)) for info in infos))
         for info, events, tool_result in results:
             for event in events:
                 yield event
@@ -448,9 +429,7 @@ class SessionStreamMixin:
         info: dict[str, Any],
     ) -> AsyncGenerator[AgentRuntimeEvent, None]:
         """串行执行单个有副作用工具。"""
-        events, tool_result = await self._execute_tool_stream(
-            info["item"], info["item_ctx"]
-        )
+        events, tool_result = await self._execute_tool_stream(info["item"], info["item_ctx"])
         for event in events:
             yield event
         async for event in self._finish_tool_execution(info["item"], tool_result):
@@ -808,9 +787,7 @@ class SessionStreamMixin:
                     read_only_batch.append(exec_info)
                     idx += 1
                 if read_only_batch:
-                    async for event in self._execute_readonly_batch(
-                        read_only_batch, tool_ctx
-                    ):
+                    async for event in self._execute_readonly_batch(read_only_batch, tool_ctx):
                         yield event
 
                 continue
@@ -1118,18 +1095,17 @@ class SessionStreamMixin:
         return False
 
     def _get_last_user_text(self) -> str:
-        """从 messages 中提取最近一条 user 消息的文本内容。"""
+        """从 messages 中提取最近一条 user 消息的真实用户输入文本。
+
+        先提取消息文本，再还原执行契约，避免把契约中的任务动词
+        （修改、创建、运行、测试等）误判为用户真实意图。
+        """
         for message in reversed(self.messages):
             if isinstance(message, dict) and message.get("role") == "user":
                 content = message.get("content", "")
-                if isinstance(content, str):
-                    return content
-                if isinstance(content, list):
-                    parts = []
-                    for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            parts.append(item.get("text", ""))
-                    return "\n".join(parts)
+                text = extract_message_text(content)
+                unwrapped = unwrap_user_prompt(text)
+                return unwrapped if isinstance(unwrapped, str) else text
         return ""
 
     def _get_skill_security(self, skill_name: str) -> dict[str, Any]:
