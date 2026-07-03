@@ -81,6 +81,7 @@ export function createWorkspacePreviewFile(
   file: WorkspacePreviewFileSource,
   sessionId?: string | null,
   token?: string,
+  workspaceId?: string | null,
 ): PreviewFile {
   const fileName = typeof file === "string" ? file : file.name;
   const normalizedFileName = workspacePathToFilename(fileName);
@@ -88,16 +89,21 @@ export function createWorkspacePreviewFile(
   const type = inferPreviewType(normalizedFileName, declaredType);
   const filePath = `/workspace/${normalizedFileName}`;
   const previewUrlOptions = getPreviewUrlOptions(type);
+  const resolvedWorkspaceId = workspaceId ?? undefined;
 
   return {
     name: normalizedFileName,
     type,
-    url: sessionId
-      ? resolveWorkspaceFileUrl(filePath, sessionId, token, previewUrlOptions)
-      : "",
-    downloadUrl: sessionId
-      ? resolveWorkspaceDownloadUrl(filePath, sessionId, token)
-      : "",
+    url: resolvedWorkspaceId
+      ? resolveWorkspaceScopedFileUrl(filePath, resolvedWorkspaceId, token, previewUrlOptions)
+      : sessionId
+        ? resolveWorkspaceFileUrl(filePath, sessionId, token, previewUrlOptions)
+        : "",
+    downloadUrl: resolvedWorkspaceId
+      ? resolveWorkspaceScopedDownloadUrl(filePath, resolvedWorkspaceId, token)
+      : sessionId
+        ? resolveWorkspaceDownloadUrl(filePath, sessionId, token)
+        : "",
     size: typeof file === "string" ? undefined : file.size,
     mtime: typeof file === "string" ? undefined : file.mtime,
     absolute_path: typeof file === "string" ? undefined : file.absolute_path,
@@ -225,12 +231,52 @@ export function resolveGlobalWorkspaceFileUrl(
   return appendAccessToken(url, token);
 }
 
+export function resolveWorkspaceScopedFileUrl(
+  path: string,
+  workspaceId: string,
+  token?: string,
+  options?: {
+    disposition?: "attachment" | "inline";
+    preferDirectBackend?: boolean;
+  },
+): string {
+  const cleanPath = stripApiBaseUrl(path || "");
+  const isAbsoluteHttpUrl = /^[a-z]+:\/\//i.test(cleanPath);
+  const disposition = options?.disposition ?? "attachment";
+  const apiBase = resolveFileApiBaseUrl(options?.preferDirectBackend ?? false);
+
+  if (isAbsoluteHttpUrl) {
+    return appendAccessToken(cleanPath, token);
+  }
+
+  const filename = workspacePathToFilename(cleanPath);
+  const searchParams = new URLSearchParams({ disposition });
+  if (disposition === "inline") {
+    searchParams.set("preview_mode", "embed_v1");
+  }
+
+  const url =
+    `${apiBase}${API_ENDPOINTS.WORKSPACE_FILE_DOWNLOAD(workspaceId, filename)}?${searchParams.toString()}`;
+
+  return appendAccessToken(url, token);
+}
+
 export function resolveWorkspaceDownloadUrl(
   path: string,
   sessionId?: string,
   token?: string,
 ): string {
   return resolveWorkspaceFileUrl(path, sessionId, token, {
+    disposition: "attachment",
+  });
+}
+
+export function resolveWorkspaceScopedDownloadUrl(
+  path: string,
+  workspaceId: string,
+  token?: string,
+): string {
+  return resolveWorkspaceScopedFileUrl(path, workspaceId, token, {
     disposition: "attachment",
   });
 }
