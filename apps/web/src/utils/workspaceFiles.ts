@@ -89,21 +89,27 @@ export function createWorkspacePreviewFile(
   const type = inferPreviewType(normalizedFileName, declaredType);
   const filePath = `/workspace/${normalizedFileName}`;
   const previewUrlOptions = getPreviewUrlOptions(type);
-  const resolvedWorkspaceId = workspaceId ?? undefined;
+  const url = workspaceId
+    ? resolveWorkspaceScopedFileUrl(
+        normalizedFileName,
+        workspaceId,
+        token,
+        previewUrlOptions,
+      )
+    : sessionId
+      ? resolveWorkspaceFileUrl(filePath, sessionId, token, previewUrlOptions)
+      : "";
+  const downloadUrl = workspaceId
+    ? resolveWorkspaceScopedDownloadUrl(normalizedFileName, workspaceId, token)
+    : sessionId
+      ? resolveWorkspaceDownloadUrl(filePath, sessionId, token)
+      : "";
 
   return {
     name: normalizedFileName,
     type,
-    url: resolvedWorkspaceId
-      ? resolveWorkspaceScopedFileUrl(filePath, resolvedWorkspaceId, token, previewUrlOptions)
-      : sessionId
-        ? resolveWorkspaceFileUrl(filePath, sessionId, token, previewUrlOptions)
-        : "",
-    downloadUrl: resolvedWorkspaceId
-      ? resolveWorkspaceScopedDownloadUrl(filePath, resolvedWorkspaceId, token)
-      : sessionId
-        ? resolveWorkspaceDownloadUrl(filePath, sessionId, token)
-        : "",
+    url,
+    downloadUrl,
     size: typeof file === "string" ? undefined : file.size,
     mtime: typeof file === "string" ? undefined : file.mtime,
     absolute_path: typeof file === "string" ? undefined : file.absolute_path,
@@ -113,6 +119,36 @@ export function createWorkspacePreviewFile(
     renderer_hint: typeof file === "string" ? undefined : file.renderer_hint,
     meta: typeof file === "string" ? undefined : file.meta,
   };
+}
+
+export function resolveWorkspaceScopedFileUrl(
+  path: string,
+  workspaceId: string,
+  token?: string,
+  options?: {
+    disposition?: "attachment" | "inline";
+    preferDirectBackend?: boolean;
+  },
+): string {
+  const cleanPath = stripApiBaseUrl(path || "");
+  const isAbsoluteHttpUrl = /^[a-z]+:\/\//i.test(cleanPath);
+  const disposition = options?.disposition ?? "attachment";
+  const apiBase = resolveFileApiBaseUrl(options?.preferDirectBackend ?? false);
+
+  if (isAbsoluteHttpUrl) {
+    return appendAccessToken(cleanPath, token);
+  }
+
+  const filename = workspacePathToFilename(cleanPath);
+  const searchParams = new URLSearchParams({ disposition });
+  if (disposition === "inline") {
+    searchParams.set("preview_mode", "embed_v1");
+  }
+
+  const url =
+    `${apiBase}${API_ENDPOINTS.WORKSPACE_FILE_DOWNLOAD(workspaceId, filename)}?${searchParams.toString()}`;
+
+  return appendAccessToken(url, token);
 }
 
 export function createGlobalWorkspacePreviewFile(

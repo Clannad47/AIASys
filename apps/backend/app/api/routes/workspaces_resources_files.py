@@ -57,7 +57,6 @@ from app.services.file_history import (
     file_history_service,
 )
 from app.services.workspace_registry import get_workspace_registry_service
-from app.utils.file_utils import sanitize_content_disposition_filename
 from app.utils.path_utils import as_system_path
 
 logger = logging.getLogger(__name__)
@@ -1686,10 +1685,9 @@ async def download_global_workspace_file(
     if disposition == "inline":
         return FileResponse(
             _sys_path(global_path),
+            filename=global_path.name,
             media_type=media_type,
-            headers={
-                "Content-Disposition": f'inline; filename="{sanitize_content_disposition_filename(global_path.name)}"'
-            },
+            content_disposition_type="inline",
         )
 
     return FileResponse(
