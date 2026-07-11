@@ -226,14 +226,8 @@ export function useSessionOrchestrator({
   }, [apiBaseUrl, getWorkspaceId]);
 
   const prepareNewSession = useCallback(async () => {
-    const hasConversation = chatItems.length > 0;
-
     // 一旦用户显式开始“新任务”流程，任何旧的历史恢复回包都不应再接管前台。
     pendingRestoreSessionIdRef.current = null;
-
-    if (!hasConversation) {
-      return sessionId;
-    }
 
     cleanupDraftSessions();
 
@@ -254,8 +248,6 @@ export function useSessionOrchestrator({
 
     return newId;
   }, [
-    chatItems.length,
-    sessionId,
     initChatSession,
     initMultiTaskSession,
     cleanupDraftSessions,
