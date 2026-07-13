@@ -116,6 +116,14 @@ def _validate_workspace_binding(
         session_id,
     )
     if resolved_workspace_id != workspace_id:
+        logger.warning(
+            "workspace binding 校验失败: user=%s session=%s "
+            "request_workspace=%s resolved_workspace=%s",
+            user_id,
+            session_id,
+            workspace_id,
+            resolved_workspace_id,
+        )
         raise HTTPException(
             status_code=400,
             detail={
@@ -141,6 +149,47 @@ async def execute_stream(request: AgentExecuteRequest, user: UserInfo = Depends(
     """
     # 解析用户ID
     user_id = _resolve_user_id(request, user)
+
+    logger.info(
+        "Agent execute_stream 请求: user=%s session=%s workspace=%s model_id=%s",
+        user_id,
+        request.session_id,
+        request.workspace_id,
+        request.model_id,
+    )
+
+    # 懒创建/绑定 workspace conversation：
+    # - session 不存在：创建新的 workspace conversation
+    # - session 已存在但未绑定到任何 workspace（例如 /status 自动创建的草稿）：
+    #   将其绑定到请求中的 workspace_id，避免后续 workspace binding 校验失败
+    existing_metadata = agent_service._session_manager.get_session(request.session_id, user_id)
+    resolved_workspace_id: str | None = None
+    if existing_metadata:
+        resolved_workspace_id = get_workspace_registry_service().find_workspace_id_by_session_id(
+            user_id,
+            request.session_id,
+        )
+
+    if request.workspace_id and (not existing_metadata or not resolved_workspace_id):
+        try:
+            get_workspace_registry_service().create_conversation(
+                user_id=user_id,
+                workspace_id=request.workspace_id,
+                title="新会话",
+                conversation_id=request.session_id,
+                make_current=True,
+            )
+            logger.info(
+                "懒创建/绑定 workspace conversation 成功: user=%s session=%s workspace=%s "
+                "existing_session=%s",
+                user_id,
+                request.session_id,
+                request.workspace_id,
+                bool(existing_metadata),
+            )
+        except Exception as e:
+            logger.warning(f"懒创建 workspace conversation 失败（继续执行）: {e}")
+
     _validate_workspace_binding(
         user_id=user_id,
         session_id=request.session_id,

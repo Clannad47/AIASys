@@ -122,7 +122,10 @@ def _build_collaboration_node_summary(user_id: str, session_id: str) -> dict:
     }
 
 
-def _find_available_draft_for_user(current_user: UserInfo):
+def _find_available_draft_for_user(
+    current_user: UserInfo,
+    workspace_id: Optional[str] = None,
+):
     user_dir = session_manager.base_dir / current_user.user_id
     if not user_dir.exists():
         return {"available": False, "reason": "no_user_dir"}
@@ -130,6 +133,7 @@ def _find_available_draft_for_user(current_user: UserInfo):
     draft_sessions = []
     now = datetime.now()
     threshold = timedelta(minutes=30)
+    registry = get_workspace_registry_service()
 
     for session_dir in user_dir.iterdir():
         if not session_dir.is_dir():
@@ -148,6 +152,15 @@ def _find_available_draft_for_user(current_user: UserInfo):
                 current_user.user_id,
             ):
                 continue
+
+            # 如果指定了工作区，只返回属于该工作区的草稿，避免跨工作区复用导致 400
+            if workspace_id is not None:
+                session_workspace_id = registry.find_workspace_id_by_session_id(
+                    current_user.user_id,
+                    session_dir.name,
+                )
+                if session_workspace_id != workspace_id:
+                    continue
 
             created_at = datetime.fromisoformat(created_at_str)
             age = now - created_at
@@ -223,10 +236,12 @@ async def create_session(request: CreateSessionRequest, user: UserInfo = Depends
         agent_type = "analysis"
 
         # 创建会话，固定绑定到当前主线的本地执行运行态
+        # 前端主动新建会话时传入 status="active"，避免被列表 API 过滤为空白草稿
         metadata = session_manager.create_session(
             session_id=request.session_id,
             user_id=user_id,
             title=request.title,
+            status=request.status or "draft",
             env_id=env_id,
             sandbox_mode=sandbox_mode,
             recovery_policy=request.recovery_policy or "journal_only",
@@ -1051,13 +1066,16 @@ async def update_session_task_profile(
 
 @router.get("/available-draft")
 async def get_available_draft(
+    workspace_id: Optional[str] = Query(None, description="限制返回指定工作区的草稿"),
     current_user: UserInfo = Depends(require_auth()),
 ):
     """
     获取一个可用的预热草稿会话
+
+    传入 workspace_id 时，只返回属于该工作区的草稿，避免跨工作区复用导致 workspace binding 失败。
     """
     try:
-        return _find_available_draft_for_user(current_user)
+        return _find_available_draft_for_user(current_user, workspace_id=workspace_id)
     except Exception as e:
         logger.error(f"获取可用草稿失败: {e}")
         return {"available": False, "reason": "error", "error": str(e)}

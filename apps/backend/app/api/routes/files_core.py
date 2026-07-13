@@ -252,10 +252,9 @@ async def download_file(
         if disposition == "inline":
             return FileResponse(
                 file_path,
+                filename=file_path.name,
                 media_type=media_type,
-                headers={
-                    "Content-Disposition": f'inline; filename="{sanitize_content_disposition_filename(file_path.name)}"'
-                },
+                content_disposition_type="inline",
             )
 
         return FileResponse(
@@ -746,7 +745,9 @@ async def move_file(
         # 确保目标父目录存在
         Path(as_system_path(target_path.parent)).mkdir(parents=True, exist_ok=True)
 
-        shutil.move(str(as_system_path(source_path)), str(as_system_path(target_path)))
+        await asyncio.to_thread(
+            shutil.move, str(as_system_path(source_path)), str(as_system_path(target_path))
+        )
 
         logger.info(
             "文件移动: %s/%s %s -> %s by %s",
@@ -816,11 +817,16 @@ async def copy_file(
 
         Path(as_system_path(target_path.parent)).mkdir(parents=True, exist_ok=True)
         if source_path.is_dir():
-            shutil.copytree(
-                str(as_system_path(source_path)), str(as_system_path(target_path)), symlinks=True
+            await asyncio.to_thread(
+                shutil.copytree,
+                str(as_system_path(source_path)),
+                str(as_system_path(target_path)),
+                symlinks=True,
             )
         else:
-            shutil.copy2(str(as_system_path(source_path)), str(as_system_path(target_path)))
+            await asyncio.to_thread(
+                shutil.copy2, str(as_system_path(source_path)), str(as_system_path(target_path))
+            )
 
         logger.info(
             "文件复制: %s/%s %s -> %s by %s",

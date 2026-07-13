@@ -66,4 +66,20 @@ contextBridge.exposeInMainWorld("__AIASYS_DESKTOP__", {
   selectFolder(options) {
     return ipcRenderer.invoke("aiasys:select-folder", options);
   },
+  // 在系统资源管理器中打开指定路径
+  openPath(targetPath) {
+    return ipcRenderer.invoke("aiasys:open-path", targetPath);
+  },
+  // 获取桌面端应用版本号
+  getVersion() {
+    return ipcRenderer.invoke("aiasys:get-version");
+  },
+  // 用系统默认浏览器打开外部链接
+  openExternal(url) {
+    return ipcRenderer.invoke("aiasys:open-external", url);
+  },
+  // 在新窗口打开指定工作区（桌面端多窗口能力）
+  openWorkspaceWindow(options) {
+    return ipcRenderer.invoke("aiasys:open-workspace-window", options);
+  },
 });

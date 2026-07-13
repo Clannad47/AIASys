@@ -23,6 +23,10 @@ export interface SessionSlot {
   // 聊天
   chatItems: ChatItem[];
   streamingMessageId: string | null;
+  // 子 Agent 状态卡片：task_tool_call_id -> ChatItem.id
+  subagentStatusMessageIds: Map<string, string>;
+  // 已自动打开 tab 的子 Agent，避免重复打开
+  subagentTabOpened: Set<string>;
   // 流式累积数据（命令式，不触发渲染）
   streamingSegments: ChatSegment[];
   outputAccumulators: Map<string, string>;
@@ -47,6 +51,8 @@ export function createEmptySlot(): SessionSlot {
     taskIdRef: undefined,
     chatItems: [],
     streamingMessageId: null,
+    subagentStatusMessageIds: new Map(),
+    subagentTabOpened: new Set(),
     streamingSegments: [],
     outputAccumulators: new Map(),
     toolCallMap: new Map(),
@@ -93,4 +99,6 @@ export function cleanupSlot(slot: SessionSlot): void {
   slot.toolCallMap.clear();
   slot.taskEventsMap = {};
   slot.streamingMessageId = null;
+  slot.subagentStatusMessageIds.clear();
+  slot.subagentTabOpened.clear();
 }

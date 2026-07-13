@@ -144,7 +144,7 @@ export function useStreamEventHandler({
     slot.flushTimer = setTimeout(() => {
       slot.flushTimer = null;
       syncSegmentsToUI(sessionId);
-    }, 50);
+    }, 120);
   }, [getSessionSlot, syncSegmentsToUI]);
 
   // 当新的非 think segment 到达时，将前面未完成的 think segment 标记为已完成
@@ -161,6 +161,57 @@ export function useStreamEventHandler({
     const slot = getSessionSlot(sessionId);
     const segments = slot.streamingSegments;
     const streamingMsgId = slot.streamingMessageId;
+
+    const upsertSubagentStatusMessage = (
+      taskId: string,
+      agentId: string,
+      subagentName: string,
+      status: "running" | "completed" | "failed" | "cancelled" = "running",
+    ) => {
+      const existingId = slot.subagentStatusMessageIds.get(taskId);
+      const label = subagentName || "专家";
+      const statusText =
+        status === "completed"
+          ? "已完成"
+          : status === "failed"
+            ? "失败"
+            : status === "cancelled"
+              ? "已取消"
+              : "正在运行";
+      const content = `子 Agent（${label}）${statusText}，详情请在右侧协作节点或标签页查看。`;
+
+      if (existingId) {
+        updateChatItems(sessionId, (prev) => {
+          const idx = prev.findIndex((item) => item.id === existingId);
+          if (idx === -1 || prev[idx].type !== "message") return prev;
+          const newItems = [...prev];
+          const existingItem = newItems[idx];
+          if (existingItem.type !== "message") return prev;
+          newItems[idx] = { ...existingItem, content };
+          return newItems;
+        });
+      } else {
+        const newId = `subagent-status-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        slot.subagentStatusMessageIds.set(taskId, newId);
+        updateChatItems(sessionId, (prev) => [
+          ...prev,
+          {
+            type: "message" as const,
+            id: newId,
+            sender: "system" as const,
+            role: "system" as const,
+            content,
+            timestamp: new Date(),
+          },
+        ]);
+      }
+
+      // 自动打开当前活跃子 Agent 的 tab，每个子 Agent 只自动打开一次
+      if (!slot.subagentTabOpened.has(agentId) && status === "running") {
+        slot.subagentTabOpened.add(agentId);
+        eventBus.emit(EVENTS.OPEN_SUBAGENT_TAB, { agentId });
+      }
+    };
 
     // Type: Turn Begin — 添加 turn 标记 segment
     if (eventType === "turn_begin" && "turn_n" in event) {
@@ -425,22 +476,20 @@ export function useStreamEventHandler({
           },
         });
       } else if (payload.type === "subagent_content") {
-        const contentText =
-          payload.content_type === "think" && payload.think
-            ? `[${subagentName}] 思考: ${payload.think}`
-            : `[${subagentName}] ${payload.text || ""}`;
-        if (!contentText.trim()) return;
-        updateChatItems(sessionId, (prev: ChatItem[]) => [
-          ...prev,
-          {
-            type: "message" as const,
-            id: `subagent-content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            sender: "system" as const,
-            role: "system" as const,
-            content: contentText,
-            timestamp: new Date(),
-          },
-        ]);
+        // 子 Agent 流式内容只在 tab 页展示，主对话仅保留一条状态卡片
+        upsertSubagentStatusMessage(taskId, event.agent_id || taskId, subagentName, "running");
+      }
+      return;
+    }
+
+    // 处理子 Agent 生命周期事件，更新主对话状态卡片
+    if (eventType === "worker_lifecycle" && event.scope === "subagent") {
+      const taskId = event.task_tool_call_id;
+      const subagentName = String(event.subagent_name || event.subagent_type || "专家");
+      const status = event.status;
+      if (taskId && (status === "completed" || status === "failed" || status === "cancelled")) {
+        const agentId = event.agent_id || taskId;
+        upsertSubagentStatusMessage(taskId, agentId, subagentName, status);
       }
       return;
     }
@@ -475,22 +524,8 @@ export function useStreamEventHandler({
       });
 
       if (eventType === "subagent_content") {
-        const contentText =
-          event.content_type === "think" && event.think
-            ? `[${subagentName}] 思考: ${event.think}`
-            : `[${subagentName}] ${event.text || ""}`;
-        if (!contentText.trim()) return;
-        updateChatItems(sessionId, (prev: ChatItem[]) => [
-          ...prev,
-          {
-            type: "message" as const,
-            id: `subagent-content-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            sender: "system" as const,
-            role: "system" as const,
-            content: contentText,
-            timestamp: new Date(),
-          },
-        ]);
+        // 子 Agent 流式内容只在 tab 页展示，主对话仅保留一条状态卡片
+        upsertSubagentStatusMessage(taskId, event.agent_id || taskId, subagentName, "running");
         return;
       }
 
